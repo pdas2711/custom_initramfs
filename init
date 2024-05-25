@@ -1,0 +1,106 @@
+#!/bin/busybox sh
+
+rescue_shell() {
+	echo "$@"
+	echo "Something went wrong. Dropping into a rescue shell."
+	/bin/busybox --install -s
+	exec /bin/busybox setsid /bin/busybox cttyhack /bin/busybox sh
+}
+
+mount_sys() {
+	echo "Mounting devtmpfs ..."
+	/bin/busybox mount -t devtmpfs none /dev
+	echo "Mounting proc ... "
+	/bin/busybox mount -t proc none /proc
+	echo "Mounting sys ..."
+	/bin/busybox mount -t sysfs none /sys
+}
+
+parse_kernel_params() {
+	echo "Parsing kernel parameters ..."
+	for kernel_cmd in $(/bin/busybox cat /proc/cmdline) ; do
+		case "${kernel_cmd}" in
+		crypt_root=*)  # Shows UUID of actual device
+			ref_type=$(printf %s "${kernel_cmd}" | /bin/busybox cut -d "=" -f 2)
+			crypt_uuid=$(printf %s "${kernel_cmd}" | /bin/busybox cut -d "=" -f 3)
+			;;
+		root=/dev/mapper/*)  # Shows what mapper name is given
+			mapper_name=$(printf %s "${kernel_cmd}" | /bin/busybox cut -d "/" -f 4)
+			;;
+		rootflags=*)  # Subvolume name
+			subvol_name=$(printf %s "${kernel_cmd}" | /bin/busybox cut -d "=" -f 3)
+			;;
+		init=*)  # Init binary
+			init=$(printf %s "${kernel_cmd}" | /bin/busybox cut -d "=" -f 2)
+			;;
+		net_if=*)  # Network interface name
+			net_if=$(printf %s "${kernel_cmd}" | /bin/busybox cut -d "=" -f 2)
+			if [ "${net_if}" == "MAC" ]; then
+				mac_addr=$(printf %s "${kernel_cmd}" | /bin/busybox cut -d "=" -f 3)  # MAC address of interface
+				net_if=$(/bin/busybox ip -o link show | /bin/busybox grep "${mac_addr}" | /bin/busybox cut -d ":" -f 2 | /bin/busybox sed "s/^ //")  # Actual interface name
+			fi
+			;;
+		net_ip4=*)  # Network static IP
+			net_ip4=$(printf %s "${kernel_cmd}" | /bin/busybox cut -d "=" -f 2)
+		esac
+	done
+}
+
+start_sshd() {
+	echo "Starting basic networking ..."
+	/bin/busybox ip link show ${net_if} &> /dev/null
+	if [ $(echo $?) == "0" ]; then
+		echo "Found ${net_if}"
+		/bin/busybox ip address flush dev ${net_if}
+		/bin/busybox ip address add ${net_ip4} dev ${net_if}
+	else
+		rescue_shell "Cannot find '${net_if}' in the list of network interfaces. Add the correct ethernet interface to the 'net_if' kernel argument and add a static ip for the 'net_ip4' kernel argument with CIDR notation."
+	fi
+	echo "Starting dropbear ..."
+	/usr/sbin/dropbear -s -g -p 23 -B
+}
+
+unlock_crypt_rootfs() {
+	dev_name=$(/bin/busybox findfs "${ref_type}"="${crypt_uuid}")
+	/sbin/cryptsetup open ${dev_name} ${mapper_name}
+}
+
+mount_rootfs() {
+	echo "Mounting rootfs ..."
+	/bin/busybox mount -o ro -o subvol\=${subvol_name} /dev/mapper/${mapper_name} /mnt/root
+}
+
+# Mount device and other system stuff
+mount_sys
+
+# Parse kernel arguments
+parse_kernel_params
+
+# Start networking and the ssh server
+start_sshd
+
+# Unlock rootfs
+trap "unlock_crypt_rootfs" INT
+echo "Waiting for remote unlock. Press Ctrl+C to unlock rootfs manually."
+while [ ! -e /dev/mapper/${mapper_name} ]; do
+	sleep 1
+done
+
+# Mount decrypted volume
+mount_rootfs || rescue_shell "Error with mounting mapper device."
+
+# Remove static ip from interface
+echo "Stop networking ..."
+/bin/busybox ip address flush dev ${net_if}
+
+# Unmount the system stuff
+echo "Unmounting proc ..."
+umount /proc
+echo "Unmounting sys ..."
+umount /sys
+echo "Unmounting devtmpfs ..."
+umount /dev
+
+# Done
+echo "Switching root ..."
+exec /bin/busybox switch_root /mnt/root ${init}
