@@ -80,10 +80,13 @@ parse_kernel_params
 start_sshd
 
 # Unlock rootfs
-trap "unlock_crypt_rootfs" INT
-echo "Waiting for remote unlock. Press Ctrl+C to unlock rootfs manually."
+echo "Waiting for remote unlock. Press 'q' to unlock rootfs manually."
 while [ ! -e /dev/mapper/${mapper_name} ]; do
-	sleep 1
+	read -t 0.25 -n 1 input
+	if [ "${input}" == "q" ]; then
+		echo
+		unlock_crypt_rootfs
+	fi
 done
 
 # Mount decrypted volume
