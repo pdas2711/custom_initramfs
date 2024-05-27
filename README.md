@@ -7,7 +7,8 @@ I might make this more modular in the future to account for more various setups.
 ## To-Do
 
 - [ ] Enable networking through ethernet interface (connected via direct connection, not to a DHCP server).
-- [ ] Allow the user that's physically on the machine to override SSH control by unlocking the root partition and boot the machine normally.
+- [x] Allow the user that's physically on the machine to override waiting for SSH control.
+- [ ] Get cryptsetup to use the libraries it needs to unlock root partition.
 
 ## Resources
 
